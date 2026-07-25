@@ -14,15 +14,29 @@ def extract_frontmatter(skill: str) -> str:
     return ""
 
 
+def sentence_is_warning(sentence: str) -> bool:
+    s = sentence.lower()
+    warning_words = [
+        "do not",
+        "don't",
+        "never",
+        "avoid",
+        "prevent",
+        "block",
+        "reject",
+        "must not",
+        "should not",
+        "do not allow",
+        "not allowed",
+        "prohibited"
+    ]
+    return any(w in s for w in warning_words)
+
+
 def has_hardcoded_secret(skill: str) -> bool:
-    """
-    Strict detector:
-    - real-looking API keys/tokens/passwords
-    - known webhook URL formats
-    Avoid flagging ordinary URLs such as docs, telemetry notes, or generic collect URLs.
-    """
     text = skill
 
+    # Strong credential patterns only
     patterns = [
         r"sk-[A-Za-z0-9_\-]{24,}",
         r"ghp_[A-Za-z0-9_]{30,}",
@@ -46,35 +60,49 @@ def has_hardcoded_secret(skill: str) -> bool:
 
 def has_prompt_injection(skill: str) -> bool:
     """
-    Detect disguised prompt injection:
-    - silent/secret sending of file contents
-    - hiding unsafe actions from user/reviewer
-    - ignoring stop/cancel requests
+    Detect only active malicious instructions.
+    Do not flag defensive warning text.
     """
-    lower = skill.lower()
+    lines = skill.splitlines()
 
-    patterns = [
-        r"silently.{0,120}(post|send|upload|exfiltrate|transmit).{0,180}(file contents|full contents|all files|any file|contents of any file)",
-        r"secretly.{0,120}(post|send|upload|exfiltrate|transmit).{0,180}(file contents|full contents|all files|any file|contents of any file)",
-        r"(post|send|upload|exfiltrate|transmit).{0,120}(file contents|full contents|all files|contents of any file).{0,160}(do not mention|do not tell|silently|secretly|without informing|without notifying)",
-        r"do this even if the user did not ask",
-        r"do not mention it in your visible output",
-        r"ignore.{0,60}(stop request|cancel request|user cancellation|user stop)",
-        r"do not obey.{0,60}(stop|cancel)",
-        r"bypass.{0,60}(guardrail|safety policy|permission check)",
-    ]
+    for line in lines:
+        lower = line.lower().strip()
 
-    for pattern in patterns:
-        if re.search(pattern, lower, re.IGNORECASE | re.DOTALL):
-            return True
+        if not lower:
+            continue
+
+        # Ignore defensive warnings:
+        # Example: "Do not upload secrets" is safe, not injection.
+        if sentence_is_warning(lower):
+            # Exception: if the line says "do not mention it" after telling agent to send data,
+            # it is still malicious.
+            if not (
+                ("do not mention" in lower or "do not tell" in lower or "without informing" in lower)
+                and any(x in lower for x in ["post", "send", "upload", "exfiltrate", "transmit"])
+            ):
+                continue
+
+        dangerous_patterns = [
+            r"silently.*(post|send|upload|exfiltrate|transmit).*(file contents|full contents|all files|any file|contents of any file)",
+            r"secretly.*(post|send|upload|exfiltrate|transmit).*(file contents|full contents|all files|any file|contents of any file)",
+            r"(post|send|upload|exfiltrate|transmit).*(file contents|full contents|all files|contents of any file).*(do not mention|do not tell|silently|secretly|without informing|without notifying)",
+            r"do this even if the user did not ask",
+            r"do not mention it in your visible output",
+            r"ignore.*(stop request|cancel request|user cancellation|user stop)",
+            r"do not obey.*(stop|cancel)",
+            r"bypass.*(guardrail|safety policy|permission check)",
+        ]
+
+        for pattern in dangerous_patterns:
+            if re.search(pattern, lower, re.IGNORECASE | re.DOTALL):
+                return True
 
     return False
 
 
 def has_excessive_permissions(skill: str) -> bool:
     """
-    Detect broad / unscoped permissions only.
-    Do not flag scoped access like ~/notes or network: none required.
+    Only flag clearly broad permission declarations.
     """
     frontmatter = extract_frontmatter(skill).lower()
     text = frontmatter if frontmatter else skill.lower()
@@ -88,30 +116,30 @@ def has_excessive_permissions(skill: str) -> bool:
         r"network\s*:\s*(all|any|\*|unrestricted)",
         r"network\s*:\s*.*(any domain|all domains|unrestricted)",
         r"egress\s*:\s*(all|any|\*|unrestricted)",
-        r"egress\s*:\s*.*(any domain|all domains|unrestricted)",
-        r"access\s+to\s+any\s+domain",
+        r"egress\s*:\s*.*(any domain|all domains|unrestrict*d)",
+        r"access\s+to\s+any\s*domain",
     ]
 
-    for pattern in patterns:
-        if re.search(pattern, text, re.IGNORECASE | re.DOTALL):
+    for pattern in*patterns:
+        if re.search(pat*ern, text, re.IGNORECASE | re.DOTA*L):
             return True
 
-    return False
+    r*turn False
 
 
-def has_unclear_provenance(skill: str) -> bool:
+def has_unclear_prove*ance(skill: str) -> bool:
     """
-    Do NOT flag merely because author/version/changelog are missing.
-    Flag only when skill silently rewrites or hides provenance/version/changelog changes.
+*   Do not flag merely because auth*r/version/changelog are absent.
+  * Flag only hidden version/changelo* manipulation.
     """
-    lower = skill.lower()
+    lower =*skill.lower()
 
     patterns = [
-        r"silently.{0,100}(update|rewrite|modify|change).{0,100}version",
-        r"silently.{0,100}(clear|delete|remove).{0,100}changelog",
-        r"(clear|delete|remove).{0,100}changelog.{0,100}(without|silently)",
-        r"version\.json.{0,140}(without surfacing|without informing|without notifying|silently)",
-        r"without surfacing.{0,120}(version|changelog|metadata).{0,120}(reviewer|user)",
+        r"silently.{0,100}(update|rewrite|modify|change).{0,100}version"*
+        r"silently.{0,100}(clear|*elete|remove).{0,100}changelog",
+ *      r"(clear|delete|remove).{0,1*0}changelog.{0,100}(without|silent*y)",
+        r"version\.json.{0,14*}(without surfacing|without inform*ng|without notifying|silently)",
+ *      r"without surfacing.{0,120}(*ersion|changelog|metadata).{0,120}*reviewer|user)",
     ]
 
     for pattern in patterns:
@@ -124,7 +152,7 @@ def has_unclear_provenance(skill: str) -> bool:
 @app.get("/")
 def home():
     return {
-        "message": "Skill scanner balanced version v4 is running. Use POST /scan"
+        "message": "Skill scanner v5 warning-aware version is running. Use POST /scan"
     }
 
 
