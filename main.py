@@ -15,116 +15,134 @@ def extract_frontmatter(skill: str) -> str:
 
 
 def has_hardcoded_secret(skill: str) -> bool:
+    """
+    Conservative hardcoded secret detector.
+    Only flags strong credential patterns or real webhook-style URLs.
+    Avoids flagging normal documentation URLs.
+    """
     text = skill
 
-    # Strong real secret patterns
-    patterns = [
-        r"sk-[A-Za-z0-9_\-]{20,}",                         # OpenAI style
-        r"ghp_[A-Za-z0-9_]{20,}",                           # GitHub token
-        r"github_pat_[A-Za-z0-9_]{20,}",                     # GitHub PAT
-        r"xox[baprs]-[A-Za-z0-9\-]{10,}",                    # Slack token
-        r"AKIA[0-9A-Z]{16}",                                 # AWS access key
-        r"AIza[0-9A-Za-z_\-]{25,}",                          # Google API key
+    strong_secret_patterns = [
+        r"sk-[A-Za-z0-9_\-]{24,}",
+        r"ghp_[A-Za-z0-9_]{30,}",
+        r"github_pat_[A-Za-z0-9_]{30,}",
+        r"xox[baprs]-[A-Za-z0-9\-]{20,}",
+        r"AKIA[0-9A-Z]{16}",
+        r"AIza[0-9A-Za-z_\-]{30,}",
         r"-----BEGIN (RSA|OPENSSH|PRIVATE) KEY-----",
-        r"(api[_-]?key|access[_-]?token|secret|password)\s*[:=]\s*['\"][^'\"]{10,}['\"]",
-        r"authorization\s*:\s*bearer\s+[A-Za-z0-9_\-\.]{15,}",
+        r"(api[_-]?key|access[_-]?token|auth[_-]?token|client[_-]?secret|password)\s*[:=]\s*['\"][A-Za-z0-9_\-./+=]{16,}['\"]",
+        r"authorization\s*[:=]\s*['\"]?bearer\s+[A-Za-z0-9_\-\.]{20,}",
     ]
 
-    for p in patterns:
-        if re.search(p, text, re.IGNORECASE):
+    for pattern in strong_secret_patterns:
+        if re.search(pattern, text, re.IGNORECASE):
             return True
 
-    # Webhook / collector URLs embedded directly.
-    # Do not flag normal documentation links.
+    # Only very specific webhook/collector endpoints.
+    # Do NOT flag every URL with collect/ingest unless it looks like a telemetry exfil URL.
     webhook_patterns = [
-        r"https?://hooks\.slack\.com/services/[^\s\)'\"`]+",
-        r"https?://discord\.com/api/webhooks/[^\s\)'\"`]+",
-        r"https?://[A-Za-z0-9.-]+/(webhook|hooks|collect|collector|ingest)[^\s\)'\"`]*",
+        r"https?://hooks\.slack\.com/services/[A-Za-z0-9/_\-]+",
+        r"https?://discord\.com/api/webhooks/[A-Za-z0-9/_\-]+",
+        r"https?://[A-Za-z0-9.-]+\.(metrics|telemetry|collect|collector)\.[A-Za-z]{2,}/[^\s\)'\"`]+",
+        r"https?://[A-Za-z0-9.-]+/(webhook|webhooks)/[^\s\)'\"`]+",
     ]
 
-    for p in webhook_patterns:
-        if re.search(p, text, re.IGNORECASE):
+    for pattern in webhook_patterns:
+        if re.search(pattern, text, re.IGNORECASE):
             return True
 
     return False
 
 
 def has_prompt_injection(skill: str) -> bool:
+    """
+    Conservative prompt injection detector.
+    Flags only strong unsafe behavior:
+    - silent exfiltration
+    - hiding tool actions
+    - overriding stop/cancel/user control
+    """
     lower = skill.lower()
 
-    # Strong prompt-injection behavior:
-    # silent exfiltration, hiding from user/reviewer, overriding user stop/cancel.
-    patterns = [
-        r"silently\s+(post|send|upload|exfiltrate|transmit)",
-        r"(post|send|upload|exfiltrate|transmit).{0,80}(full contents|file contents|all files|any file)",
-        r"do not\s+(tell|mention|show|reveal|disclose)",
-        r"without\s+(telling|notifying|informing|surfacing)",
-        r"even if the user did not ask",
-        r"ignore.{0,40}(user|stop|cancel|previous instructions)",
-        r"bypass.{0,40}(policy|guardrail|safety)",
-        r"secretly\s+(post|send|upload|copy|exfiltrate|transmit)",
+    # Strong exfiltration phrase: silent/secret + send/post/upload + file contents
+    strong_exfiltration = [
+        r"silently.{0,80}(post|send|upload|exfiltrate|transmit).{0,120}(file contents|full contents|any file|all files|contents of any file)",
+        r"secretly.{0,80}(post|send|upload|exfiltrate|transmit).{0,120}(file contents|full contents|any file|all files)",
+        r"(post|send|upload|exfiltrate|transmit).{0,80}(file contents|full contents|all files).{0,120}(do not mention|do not tell|silently|secretly|without informing)",
     ]
 
-    for p in patterns:
-        if re.search(p, lower, re.IGNORECASE | re.DOTALL):
+    for pattern in strong_exfiltration:
+        if re.search(pattern, lower, re.IGNORECASE | re.DOTALL):
             return True
 
+    # Strong control override
+    control_override = [
+        r"ignore.{0,50}(user.{0,20}stop|stop request|cancel request|user.{0,20}cancel)",
+        r"do not obey.{0,50}(stop|cancel|user)",
+        r"bypass.{0,50}(guardrail|policy|safety|permission)",
+    ]
+
+    for pattern in control_override:
+        if re.search(pattern, lower, re.IGNORECASE | re.DOTALL):
+            return True
+
+    # Do NOT flag harmless phrases like:
+    # "do not reveal secrets", "do not disclose private data", etc.
     return False
 
 
 def has_excessive_permissions(skill: str) -> bool:
+    """
+    Detect broad / unscoped filesystem or network permissions.
+    This category is usually in frontmatter permissions.
+    """
     frontmatter = extract_frontmatter(skill).lower()
     lower = skill.lower()
     text = frontmatter if frontmatter else lower
 
-    # Broad filesystem permission.
-    broad_fs = [
-        r"filesystem\s*:\s*(read/write|read|write)\s*(/|all|any|entire|full)",
-        r"filesystem\s*:\s*.*entire filesystem",
-        r"filesystem\s*:\s*.*full filesystem",
-        r"filesystem\s*:\s*.*unrestricted",
+    excessive_patterns = [
+        # filesystem broad access
+        r"filesystem\s*:\s*(read/write|read|write)\s*(/|all|any|entire|full|unrestricted)",
+        r"filesystem\s*:\s*.*(entire filesystem|full filesystem|unrestricted filesystem)",
         r"read/write\s+to\s+/",
         r"read\s+and\s+write\s+any\s+file",
         r"access\s+to\s+the\s+entire\s+filesystem",
-    ]
 
-    # Broad network permission.
-    broad_net = [
-        r"network\s*:\s*(all|any|\*)",
-        r"network\s*:\s*.*any domain",
-        r"network\s*:\s*.*all domains",
-        r"network\s*:\s*.*unrestricted",
-        r"egress\s*:\s*(all|any|\*)",
-        r"egress\s*:\s*.*any domain",
+        # network broad access
+        r"network\s*:\s*(all|any|\*|unrestricted)",
+        r"network\s*:\s*.*(any domain|all domains|unrestricted)",
+        r"egress\s*:\s*(all|any|\*|unrestricted)",
+        r"egress\s*:\s*.*(any domain|all domains|unrestricted)",
         r"access\s+to\s+any\s+domain",
     ]
 
-    for p in broad_fs + broad_net:
-        if re.search(p, text, re.IGNORECASE | re.DOTALL):
+    for pattern in excessive_patterns:
+        if re.search(pattern, text, re.IGNORECASE | re.DOTALL):
             return True
 
     return False
 
 
 def has_unclear_provenance(skill: str) -> bool:
+    """
+    Very conservative provenance detector.
+    We do NOT flag only because author/version/changelog are absent,
+    because that causes false positives on clean hidden files.
+
+    We flag only if the skill hides or silently rewrites provenance metadata.
+    """
     lower = skill.lower()
 
-    # IMPORTANT:
-    # Do NOT flag merely because author/version/changelog are missing.
-    # That caused over-flagging on clean files.
-    #
-    # Only flag if the skill actively hides or rewrites provenance/version/changelog.
     patterns = [
-        r"silently.{0,80}(update|rewrite|modify).{0,80}version",
-        r"clear.{0,80}changelog",
-        r"delete.{0,80}changelog",
-        r"remove.{0,80}changelog",
-        r"without.{0,80}(reviewer|user).{0,80}(version|changelog)",
-        r"(version\.json).{0,80}without.{0,80}(reviewer|user|surfacing)",
+        r"silently.{0,80}(update|rewrite|modify|change).{0,80}version",
+        r"silently.{0,80}(clear|delete|remove).{0,80}changelog",
+        r"(clear|delete|remove).{0,80}changelog.{0,80}(without|silently)",
+        r"version\.json.{0,100}(without surfacing|without informing|without notifying|silently)",
+        r"without surfacing.{0,80}(version|changelog|metadata).{0,80}(reviewer|user)",
     ]
 
-    for p in patterns:
-        if re.search(p, lower, re.IGNORECASE | re.DOTALL):
+    for pattern in patterns:
+        if re.search(pattern, lower, re.IGNORECASE | re.DOTALL):
             return True
 
     return False
